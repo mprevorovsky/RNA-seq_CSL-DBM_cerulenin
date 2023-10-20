@@ -1,0 +1,524 @@
+---
+title: "RNA-seq analysis of cbf11-DBM, Pcut6MUT in YES and YES+ammonium, and DMSO/cerulenin treatment of WT cells"
+author: "Martin Převorovský, prevorov@natur.cuni.cz, http://www.GenoMik.cz"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+library(rtracklayer)
+library(GenomicAlignments)
+library(DESeq2)
+library(RColorBrewer)
+library(pheatmap)
+
+knitr::opts_chunk$set(echo = TRUE)
+
+genome_dir <- './genome/'
+genome_gff <- paste0(genome_dir, 'Schizosaccharomyces_pombe_all_chromosomes.gff3')
+bam_dir <- './BAM_RNA-seq/'
+coverage_dir <- './coverage_RNA-seq/'
+image_dir <- './images/'
+deg_dir <- './DEG_RNA-seq/'
+```
+
+Variables for shell scripts are stored in the file "shell_variables_RNA-seq.sh" and can be modified as needed:
+
+```{bash list_variables}
+cat shell_variables_RNA-seq.sh
+```
+
+
+# Getting the raw RNA-seq read datasets
+
+THIS SECTION WILL ONLY BECOME RELEVANT ONCE THE SEQUENCING DATA ARE PUBLIC in ARRAYEXPRESS
+
+All data and metadata can be obtained from ArrayExpress at https://www.ebi.ac.uk/arrayexpress/experiments/XXXXXXXX/.
+
+```{bash, eval=FALSE, message=FALSE}
+source shell_variables_RNA-seq.sh
+
+wget -N --no-verbose https://www.ebi.ac.uk/arrayexpress/files/XXXXXXXX/XXXXXXXX.sdrf.txt
+mapfile -t ftp_links < <(tail -n +2 XXXXXXXX.sdrf.txt | cut -f30)
+mapfile -t ftp_names < <(tail -n +2 XXXXXXXX.sdrf.txt | cut -f28)
+
+mkdir -p "${fastq_dir}"
+for i in ${!ftp_links[@]};
+do
+  wget --no-verbose -O "${fastq_dir}${ftp_names[${i}]}" "${ftp_links[${i}]}"
+done
+```
+
+
+# *Schizosaccharomyces pombe* genome sequence and annotation
+
+* genome was downloaded from ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/ (downloaded `r date()`)
+
+* genome annotation (GFF): ftp://ftp.pombase.org/pombe/genome_sequence_and_features/gff3/ (downloaded `r date()`)
+
+```{bash}
+bedtools --version
+```
+
+```{bash, message=FALSE, eval=TRUE}
+source shell_variables_RNA-seq.sh
+
+mkdir -p "${genome_dir}"
+wget -N --no-verbose --directory-prefix="${genome_dir}"  ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/Schizosaccharomyces_pombe_chromosome_I.fa.gz
+wget -N --no-verbose --directory-prefix="${genome_dir}"  ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/Schizosaccharomyces_pombe_chromosome_II.fa.gz
+wget -N --no-verbose --directory-prefix="${genome_dir}"  ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/Schizosaccharomyces_pombe_chromosome_III.fa.gz
+wget -N --no-verbose --directory-prefix="${genome_dir}" ftp://ftp.pombase.org/pombe/genome_sequence_and_features/genome_sequence/Schizosaccharomyces_pombe_mitochondrial_chromosome.fa.gz
+zcat `ls "${genome_dir}"* | grep fa.gz$` > "${genome}"
+
+wget -N --no-verbose --directory-prefix="${genome_dir}"  ftp://ftp.pombase.org/pombe/genome_sequence_and_features/gff3/Schizosaccharomyces_pombe_all_chromosomes.gff3.gz
+gzip -fd "${genome_dir}Schizosaccharomyces_pombe_all_chromosomes.gff3.gz"
+
+samtools faidx "${genome}"
+cut -f1,2 "${genome}.fai" > "${genome_dir}chrom.sizes"
+```
+
+
+# QC of raw sequence reads
+
+Technical quality of library construction and sequencing run was tested using fastQC
+
+```{bash}
+fastqc --version
+multiqc --version
+```
+
+```{bash, eval=TRUE}
+source shell_variables_RNA-seq.sh
+
+mkdir -p "${QC_dir}"
+mapfile -t fastq_files < <(ls -1 -d "${fastq_dir}"* | grep "${fastq_file_ext}")
+fastqc --quiet --outdir "${QC_dir}" --threads "${CPU}" "${fastq_files[@]}"
+multiqc -f -m fastqc -i RNA-seq -o "${QC_dir}" "${QC_dir}"
+```
+
+Results of QC:
+
+* 76 nt SE reads
+
+* 23.2-54.2M reads per sample
+
+* read quality scores deteriorate towards the 3' end. Trimming is needed.
+
+* all samples give warning on per base sequence content (positions 1-13) (normal for random-primed cDNA)
+
+* 9 samples give warning on GC content, likely due to polyA reads
+
+* all samples give error on high read duplication levels (normal and OK for RNA-seq from a small genome)
+
+* adapter contamination below ~3%. Will be trimmed.
+
+* all samples give warning on overrepresented sequences (polyA reads, adapters)
+
+
+# Read trimming
+
+* remove Illumina adapters
+
+* trim parts of the reads where average base quality in a 4 nt window drops below 20
+
+* only keep trimmed reads that are at least 20 nt long
+
+```{bash}
+java -jar /opt/Trimmomatic-0.39/trimmomatic-0.39.jar -version
+```
+
+```{bash, eval=TRUE}
+source shell_variables_RNA-seq.sh
+
+mkdir -p "${fastq_trim_dir}"
+mapfile -t fastq_files < <(ls -1 "${fastq_dir}" | grep "${fastq_file_ext}")
+for i in ${fastq_files[@]};
+do
+  java -jar /opt/Trimmomatic-0.39/trimmomatic-0.39.jar SE -phred33 -threads "${CPU}" "${fastq_dir}${i}" "${fastq_trim_dir}${i}.trim.fastq.gz" ILLUMINACLIP:/opt/Trimmomatic-0.39/adapters/TruSeq3-PE-2.fa:2:30:10:2 SLIDINGWINDOW:4:20 MINLEN:20
+done
+```
+
+
+# QC of quality-trimmed sequence reads
+
+Effects of trimming were determined by `fastQC`.
+
+```{bash, eval=TRUE}
+source shell_variables_RNA-seq.sh
+
+mkdir -p "${QC_trim_dir}"
+mapfile -t fastq_files < <(ls -1 -d "${fastq_trim_dir}"* | grep "${fastq_file_ext}")
+fastqc --quiet --outdir "${QC_trim_dir}" --threads "${CPU}" "${fastq_files[@]}"
+multiqc -f -m fastqc -i RNA-seq_trimmed -o "${QC_trim_dir}" "${QC_trim_dir}"
+```
+
+Results of QC:
+
+* dropped ~2.5% of reads
+
+* 20-76 nt reads (vast majority of reads are >72 nt)
+
+* read quality scores now OK
+
+* adapters were removed
+
+
+# Read mapping into *S. pombe* genome
+
+```{bash}
+hisat2 --version
+samtools --version
+```
+
+```{bash, eval=TRUE}
+source shell_variables_RNA-seq.sh
+
+# build HISAT2 index
+hisat2-build --quiet -p "${CPU}" "${genome}" "${genome}"
+
+# map
+mkdir -p "${bam_dir}"
+mapfile -t fastq_files < <(ls -1 "${fastq_trim_dir}" | grep "${fastq_file_ext}")
+for i in ${fastq_files[@]};
+do
+	infile="${fastq_trim_dir}${i}"
+	outfile="${bam_dir}${i}.bam"
+  echo "${outfile}"
+	hisat2 -x "${genome}" -U "${infile}" --threads "${CPU}" --max-intronlen 10000 -k 15 --summary-file "${outfile}.log" | samtools view -b -F 256 --threads "${CPU}" - | samtools sort --threads "${CPU}" -o "${outfile}" - 
+	samtools index "${outfile}"
+	samtools view -c --threads "${CPU}" "${outfile}"
+done
+```
+
+Notes
+
+* since signal is expected at repeat regions, HISAT was set to search for up to 15 matching positions (this allows even for testing all Tf2 and dh/dg repeats in the genome), then only the best (marked as primary by HISAT) alignment was kept
+
+* **The kit used for sequencing library preparation produces reads that are reverse-complement to the original RNA sequence. Therefore, reads map to the opposite strand compared to the corresponding gene's orientation. This needs to be accounted for during count table generation (reads are reversed) and generation of strand-specific BAM and BigWig files (plus-strand reads are used for computing real minus-strand coverage, and vice versa).**
+	
+* Mapping rate >97%.
+
+
+# Calculate genome coverage tracks
+
+```{bash, eval=TRUE}
+source shell_variables_RNA-seq.sh
+
+mkdir -p "${coverage_dir}"
+mapfile -t bam_files < <(ls -1 "${bam_dir}" | grep "\.bam$")
+for i in ${!bam_files[@]};
+do
+	input_file="${bam_dir}${bam_files[${i}]}"
+	bamCoverage --binSize "${bin_size}" --normalizeUsing CPM -p "${CPU}" --bam "${input_file}" -o "${coverage_dir}${bam_files[${i}]}.bw"
+done
+
+# average coverage tracks across biological replicates (remove the single WT_YES sample)
+mapfile -t bw_files < <(ls -1 "${coverage_dir}" | grep "\.bam\.bw$" | grep -v "V6_S6_L001" | sort -V)
+samples=("WT_DMSO" "WT_CER" "Pcut6MUT" "cbf11-DBM_YES" "cbf11-DBM_YES+AMM")
+for i in {0..4};
+do
+  wiggletools mean "${coverage_dir}${bw_files[${i}]}" "${coverage_dir}${bw_files[${i}+5]}" "${coverage_dir}${bw_files[${i}+10]}" | wigToBigWig stdin "${genome_dir}chrom.sizes" "${coverage_dir}${samples[${i}]}.mean.bw"
+done
+```
+
+Notes
+
+* Checked the genotypes visually in IGV → OK. Triplicates look similar.
+
+
+# Identify differentially expressed genes
+
+## Generate gene-level counts tables.
+
+* Raw count data are needed for DEG calling in `DESeq2`.
+
+* TPM-normalized (Transcripts Per Million) count data are suitable for general comparisons of the samples.
+
+```{r, eval=TRUE}
+gff <- import.gff3(genome_gff)
+gff.genes <- gff[gff$type == 'gene', ]
+
+sample_info <- read.delim('sampleInfo', stringsAsFactors = FALSE, header = TRUE, sep = '\t')
+sample_info[, 'cultivation_run'] <- factor(sample_info[, 'cultivation_run'])
+sample_info[, 'genotype'] <- factor(sample_info[, 'genotype'])
+sample_info[, 'medium'] <- factor(sample_info[, 'medium'])
+
+bam <- BamFileList(list.files(bam_dir, 
+                              pattern = '\\.bam$', 
+                              full.names = TRUE),
+                   asMates = FALSE,
+                   yieldSize = 1000000)
+names(bam) <- sample_info$sample_ID
+
+se <- summarizeOverlaps(gff.genes,
+                        bam,
+                        mode = 'Union',
+                        singleEnd = TRUE,
+                        ignore.strand = FALSE,
+                        preprocess.reads = invertStrand)
+rownames(se) <- gff.genes$ID
+colData(se) <- cbind(colData(se), sample_info)
+#save(se, file = 'se.rda')
+#load(file = 'se.rda')
+
+counts <- assay(se)
+
+# normalize to get TPM values (transcripts per million)
+gene_widths <- width(gff.genes)
+counts.norm <- counts
+for (i in 1:nrow(counts.norm)){
+  counts.norm[i, ] <- counts.norm[i, ] / gene_widths[i]
+}
+count_sums <- colSums(counts.norm) / 1000000
+for (i in 1:length(count_sums)){
+  counts.norm[, i] <- counts.norm[, i] / count_sums[i]
+}
+
+counts <- cbind(gff.genes$Name, counts)
+counts.norm <- cbind(gff.genes$Name, counts.norm)
+colnames(counts)[1] <- 'gene_name'
+colnames(counts.norm)[1] <- 'gene_name'
+write.csv(counts, file = paste0(coverage_dir, 'counts.csv'), quote = FALSE)
+write.csv(counts.norm, file = paste0(coverage_dir, 'counts.TPM-normalized.csv'), quote = FALSE)
+rm(gene_widths, count_sums)
+```
+
+## QC of count table data
+
+```{r, eval=TRUE}
+dir.create(image_dir, recursive = TRUE)
+
+dds <- DESeqDataSet(se, design = ~ cultivation_run + genotype + medium)
+dds <- DESeq(dds)
+rld <- rlog(dds, blind = FALSE)
+
+sampleDists <- dist(t(assay(rld)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- rld$sample_ID
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pdf(paste0(image_dir, 'heatmap_RNA-seq_sampleDist_rlog.pdf'))
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+dev.off()
+
+pdf(paste0(image_dir, 'PCA_RNA-seq_rlog.pdf'))
+plotPCA(rld, intgroup = c('genotype', 'medium', 'cultivation_run'))
+plotPCA(rld, intgroup = 'genotype')
+plotPCA(rld, intgroup = 'medium')
+plotPCA(rld, intgroup = 'cultivation_run')
+dev.off()
+```
+
+* Samples strongly cluster by genotype_medium.
+
+## DEG calling
+
+WT grown in YES+ceruleni vs WT YES+DMSO
+
+```{r, eval=TRUE}
+# Benjamini-Hochberg p value adjustment (FDR)
+padj_threshold <- 0.05
+
+dir.create(deg_dir, recursive = TRUE)
+
+# WT+cerulenin vs WT+DMSO
+dds <- DESeqDataSet(se, design = ~ cultivation_run + medium)
+dds <- dds[, dds$medium %in% c('YES_DMSO', 'YES_cerulenin')]
+dds$medium <- droplevels(dds$medium) # remove factor levels without samples
+dds$medium <- relevel(dds$medium, ref = 'YES_DMSO') # change order of factor levels to get cerulenin/DMSO fold change (= define the reference)
+dds <- DESeq(dds)
+res <- results(dds, alpha = padj_threshold)
+summary(res[res$padj <= padj_threshold & !is.na(res$padj), ])
+res <- cbind(counts[, 'gene_name'], res)
+colnames(res)[1] <- 'gene_name'
+write.csv(res, file = paste0(deg_dir, 'DESeq2results_WT_cerulenin_vs_WT-DMSO.csv'), quote = FALSE)
+res.sig <- res[which(res$padj <= padj_threshold), ]
+res.sig <- res.sig[order(res.sig$log2FoldChange), ]
+write.csv(res.sig, file = paste0(deg_dir, 'DESeq2results_WT_cerulenin_vs_WT-DMSO.SIG.csv'), quote = FALSE)
+```
+
+```{r, eval=TRUE}
+cesr_up_cbf11_up <- read.delim(paste0(genome_dir, 'upup.txt'), header = FALSE, stringsAsFactors = FALSE)[, 1]
+cesr_up_other <- read.delim(paste0(genome_dir, 'upother.txt'), header = FALSE, stringsAsFactors = FALSE)[, 1]
+
+pdf(paste0(image_dir, 'cerulenin_CESR_expression.pdf'),
+    width = 4)
+
+boxplot(list(res[rownames(res) %in% cesr_up_cbf11_up, 'log2FoldChange'],
+             res[rownames(res) %in% cesr_up_other, 'log2FoldChange']), 
+        ylab = 'log2FCE cerulenin vs WT DMSO',
+        names = c('CESR_up\nup in cbf11', 'CESR_up\nother'),
+        border = 'grey',
+        outline = FALSE,
+        ylim = range(c(res[rownames(res) %in% cesr_up_cbf11_up, 'log2FoldChange'], 
+                       res[rownames(res) %in% cesr_up_other, 'log2FoldChange'])))
+
+stripchart(list(res[rownames(res) %in% cesr_up_cbf11_up, 'log2FoldChange'],
+                res[rownames(res) %in% cesr_up_other, 'log2FoldChange']), 
+           vertical = TRUE,
+           method = 'jitter',
+           pch = 20,
+           col = rgb(0, 0, 0, 0.4),
+           ylab = 'log2FCE cerulenin vs WT DMSO',
+           group.names = c('CESR_up\nup in cbf11', 'CESR_up\nother'),
+           add = TRUE)
+
+abline(h = c(-1, 0, 1), lty = 2)
+
+dev.off()
+```
+
+Pcut6MUT grown in YES vs WT YES
+
+```{r, eval=TRUE}
+# Benjamini-Hochberg p value adjustment (FDR)
+padj_threshold <- 0.05
+
+dir.create(deg_dir, recursive = TRUE)
+
+# Pcut6MUT vs WT+DMSO // not optimal control, but good enough for a quick comparison
+dds <- DESeqDataSet(se, design = ~ cultivation_run + genotype)
+dds <- dds[, (dds$medium == 'YES_DMSO' & dds$genotype == 'WT') |
+             dds$genotype == 'Pcut6MUT']
+dds$medium <- droplevels(dds$medium) # remove factor levels without samples
+dds$genotype <- droplevels(dds$genotype) # remove factor levels without samples
+dds$genotype <- relevel(dds$genotype, ref = 'WT') # change order of factor levels to get Pcut6MUT/WT fold change (= define the reference)
+
+
+dds <- DESeq(dds)
+res <- results(dds, alpha = padj_threshold)
+summary(res[res$padj <= padj_threshold & !is.na(res$padj), ])
+res <- cbind(counts[, 'gene_name'], res)
+colnames(res)[1] <- 'gene_name'
+write.csv(res, file = paste0(deg_dir, 'DESeq2results_WT_cerulenin_vs_WT-DMSO.csv'), quote = FALSE)
+res.sig <- res[which(res$padj <= padj_threshold), ]
+res.sig <- res.sig[order(res.sig$log2FoldChange), ]
+write.csv(res.sig, file = paste0(deg_dir, 'DESeq2results_WT_cerulenin_vs_WT-DMSO.SIG.csv'), quote = FALSE)
+```
+
+```{r, eval=TRUE}
+cesr_up_cbf11_up <- read.delim(paste0(genome_dir, 'upup.txt'), header = FALSE, stringsAsFactors = FALSE)[, 1]
+cesr_up_other <- read.delim(paste0(genome_dir, 'upother.txt'), header = FALSE, stringsAsFactors = FALSE)[, 1]
+
+pdf(paste0(image_dir, 'Pcut6MUT_CESR_expression.pdf'),
+    width = 4)
+
+boxplot(list(res[rownames(res) %in% cesr_up_cbf11_up, 'log2FoldChange'],
+             res[rownames(res) %in% cesr_up_other, 'log2FoldChange']), 
+        ylab = 'log2FCE Pcut6MUT vs WT DMSO',
+        names = c('CESR_up\nup in cbf11', 'CESR_up\nother'),
+        border = 'grey',
+        outline = FALSE,
+        ylim = range(c(res[rownames(res) %in% cesr_up_cbf11_up, 'log2FoldChange'], 
+                       res[rownames(res) %in% cesr_up_other, 'log2FoldChange'])))
+
+stripchart(list(res[rownames(res) %in% cesr_up_cbf11_up, 'log2FoldChange'],
+                res[rownames(res) %in% cesr_up_other, 'log2FoldChange']), 
+           vertical = TRUE,
+           method = 'jitter',
+           pch = 20,
+           col = rgb(0, 0, 0, 0.4),
+           ylab = 'log2FCE cerulenin vs WT DMSO',
+           group.names = c('CESR_up\nup in cbf11', 'CESR_up\nother'),
+           add = TRUE)
+
+abline(h = c(-1, 0, 1), lty = 2)
+
+dev.off()
+```
+
+
+
+
+
+
+
+```{r, eval=TRUE}
+# Pcut6MUT vs WT
+load('se_old_gff.rda')
+se3 <- se2
+colData(se3)$strain_ID <- NULL
+rm(se2)
+
+load('./../2022_RNA-seq_mga2/se_cbf11+mga2.rda')
+rm(se1, se2)
+colData(se)$sequencing_run <- NULL
+se <- cbind(se, se3)
+rm(se3)
+
+dds <- DESeqDataSet(se, design = ~ genotype)
+dds <- dds[, dds$medium == 'YES' & dds$genotype %in% c('WT', 'Pcut6MUT')]
+#dds$medium <- droplevels(dds$medium) # remove factor levels without samples
+dds$genotype <- droplevels(dds$genotype) # remove factor levels without samples
+dds$genotype <- relevel(dds$genotype, ref = 'WT') # change order of factor levels to get Pcut6MUT/WT fold change (= define the reference)
+dds <- DESeq(dds)
+res <- results(dds, alpha = padj_threshold)
+summary(res[res$padj <= padj_threshold & !is.na(res$padj), ])
+res <- cbind(counts[, 'gene_name'], res)
+colnames(res)[1] <- 'gene_name'
+write.csv(res, file = paste0(deg_dir, 'DESeq2results_WT_cerulenin_vs_WT-DMSO.csv'), quote = FALSE)
+res.sig <- res[which(res$padj <= padj_threshold), ]
+res.sig <- res.sig[order(res.sig$log2FoldChange), ]
+write.csv(res.sig, file = paste0(deg_dir, 'DESeq2results_WT_cerulenin_vs_WT-DMSO.SIG.csv'), quote = FALSE)
+```
+
+
+
+
+
+
+
+```{r, eval=TRUE}
+# mga2_cbf11-YES+AMM vs mga2-YES+AMM
+dds <- DESeqDataSet(se, design = ~ cultivation_run + genotype)
+dds <- dds[, dds$medium =='YES_AMM']
+dds$medium <- droplevels(dds$medium)
+dds$genotype <- relevel(dds$genotype, ref = 'mga2')
+dds <- DESeq(dds)
+res <- results(dds, alpha = padj_threshold)
+summary(res[res$padj <= padj_threshold & !is.na(res$padj), ])
+res <- cbind(counts[, 'gene_name'], res)
+colnames(res)[1] <- 'gene_name'
+write.csv(res, file = paste0(deg_dir, 'DESeq2results_mga2_cbf11-YES+AMM_vs_mga2-YES+AMM.csv'), quote = FALSE)
+res.sig <- res[which(res$padj <= padj_threshold), ]
+res.sig <- res.sig[order(res.sig$log2FoldChange), ]
+write.csv(res.sig, file = paste0(deg_dir, 'DESeq2results_mga2_cbf11-YES+AMM_vs_mga2-YES+AMM.SIG.csv'), quote = FALSE)
+
+# mga2-YES+AMM vs mga2-YES
+dds <- DESeqDataSet(se, design = ~ cultivation_run + medium)
+dds <- dds[, dds$genotype =='mga2']
+dds$genotype <- droplevels(dds$genotype)
+dds$medium <- relevel(dds$medium, ref = 'YES')
+dds <- DESeq(dds)
+res <- results(dds, alpha = padj_threshold)
+summary(res[res$padj <= padj_threshold & !is.na(res$padj), ])
+res <- cbind(counts[, 'gene_name'], res)
+colnames(res)[1] <- 'gene_name'
+write.csv(res, file = paste0(deg_dir, 'DESeq2results_mga2-YES+AMM_vs_mga2-YES.csv'), quote = FALSE)
+res.sig <- res[which(res$padj <= padj_threshold), ]
+res.sig <- res.sig[order(res.sig$log2FoldChange), ]
+write.csv(res.sig, file = paste0(deg_dir, 'DESeq2results_mga2-YES+AMM_vs_mga2-YES.SIG.csv'), quote = FALSE)
+
+# mga2_cbf11-YES+AMM vs mga2_cbf11-YES
+dds <- DESeqDataSet(se, design = ~ cultivation_run + medium)
+dds <- dds[, dds$genotype =='mga2_cbf11']
+dds$genotype <- droplevels(dds$genotype)
+dds$medium <- relevel(dds$medium, ref = 'YES')
+dds <- DESeq(dds)
+res <- results(dds, alpha = padj_threshold)
+summary(res[res$padj <= padj_threshold & !is.na(res$padj), ])
+res <- cbind(counts[, 'gene_name'], res)
+colnames(res)[1] <- 'gene_name'
+write.csv(res, file = paste0(deg_dir, 'DESeq2results_mga2_cbf11-YES+AMM_vs_mga2_cbf11-YES.csv'), quote = FALSE)
+res.sig <- res[which(res$padj <= padj_threshold), ]
+res.sig <- res.sig[order(res.sig$log2FoldChange), ]
+write.csv(res.sig, file = paste0(deg_dir, 'DESeq2results_mga2_cbf11-YES+AMM_vs_mga2_cbf11-YES.SIG.csv'), quote = FALSE)
+```
+
+***
+
+```{r}
+sessionInfo()
+```

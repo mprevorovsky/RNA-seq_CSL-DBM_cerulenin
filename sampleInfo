@@ -1,0 +1,18 @@
+sample	sample_ID	bam_file	cultivation_run	genotype	medium	strain_ID
+V1	WT_YES_DMSO_1	V1_S1_L001_R1_001.fastq.gz.trim.fastq.gz.bam	1	WT	YES_DMSO	JB32
+V10	cbf11DBM_YES_2	V10_S10_L001_R1_001.fastq.gz.trim.fastq.gz.bam	2	cbf11DBM	YES	MP712
+V11	cbf11DBM_YES_AMM_2	V11_S11_L001_R1_001.fastq.gz.trim.fastq.gz.bam	2	cbf11DBM	YES_AMM	MP712
+V12	WT_YES_DMSO_3	V12_S12_L001_R1_001.fastq.gz.trim.fastq.gz.bam	3	WT	YES_DMSO	JB32
+V13	WT_YES_cerulenin_3	V13_S13_L001_R1_001.fastq.gz.trim.fastq.gz.bam	3	WT	YES_cerulenin	JB32
+V14	Pcut6MUT_YES_3	V14_S14_L001_R1_001.fastq.gz.trim.fastq.gz.bam	3	Pcut6MUT	YES	MP636
+V15	cbf11DBM_YES_3	V15_S15_L001_R1_001.fastq.gz.trim.fastq.gz.bam	3	cbf11DBM	YES	MP712
+V16	cbf11DBM_YES_AMM_3	V16_S16_L001_R1_001.fastq.gz.trim.fastq.gz.bam	3	cbf11DBM	YES_AMM	MP712
+V2	WT_YES_cerulenin_1	V2_S2_L001_R1_001.fastq.gz.trim.fastq.gz.bam	1	WT	YES_cerulenin	JB32
+V3	Pcut6MUT_YES_1	V3_S3_L001_R1_001.fastq.gz.trim.fastq.gz.bam	1	Pcut6MUT	YES	MP636
+V4	cbf11DBM_YES_1	V4_S4_L001_R1_001.fastq.gz.trim.fastq.gz.bam	1	cbf11DBM	YES	MP712
+V5	cbf11DBM_YES_AMM_1	V5_S5_L001_R1_001.fastq.gz.trim.fastq.gz.bam	1	cbf11DBM	YES_AMM	MP712
+V6	WT_YES_1	V6_S6_L001_R1_001.fastq.gz.trim.fastq.gz.bam	1	WT	YES	JB32
+V7	WT_YES_DMSO_2	V7_S7_L001_R1_001.fastq.gz.trim.fastq.gz.bam	2	WT	YES_DMSO	JB32
+V8	WT_YES_cerulenin_2	V8_S8_L001_R1_001.fastq.gz.trim.fastq.gz.bam	2	WT	YES_cerulenin	JB32
+V9	Pcut6MUT_YES_2	V9_S9_L001_R1_001.fastq.gz.trim.fastq.gz.bam	2	Pcut6MUT	YES	MP636
+
